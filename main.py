@@ -5,9 +5,7 @@ import os
 import sys
 import shutil
 from typing import Dict, List, Optional, Tuple
-from multiprocessing import Pool, cpu_count
-from pprint import pprint
-from pathlib import Path
+from multiprocessing import Pool, cpu_count, freeze_support
 
 def _process_image_and_calculate_blurriness(image_path: str) -> Tuple[str, Optional[float]]:
     """
@@ -99,31 +97,101 @@ def get_image_paths(path: str) -> List[str]:
                     image_files.append(full_path)
     
     return image_files
-def prompt_for_path(default: str = "raw") -> str:
+
+def open_file_dialog() -> Optional[List[str]]:
     """
-    Prompt the user for a folder or file path to process.
+    Opens a native file/folder dialog allowing users to select one or more files/folders.
+    Returns a list of selected paths, or None if cancelled.
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()  # Hide the root window
+        root.attributes('-topmost', True)  # Bring dialog to front
+
+        # Open file dialog that allows selecting files and folders
+        selected = filedialog.askopenfilenames(
+            title="Select image(s) or folder(s) to process",
+            filetypes=[
+                ("All Images", "*.jpg *.jpeg *.png *.gif *.bmp *.tiff *.webp *.cr3 *.dng *.nef *.arw"),
+                ("JPEG", "*.jpg *.jpeg"),
+                ("PNG", "*.png"),
+                ("RAW", "*.cr3 *.dng *.nef *.arw"),
+                ("All Files", "*.*")
+            ],
+            multiple=True
+        )
+
+        root.destroy()
+
+        if selected:
+            return list(selected)
+        else:
+            return None
+
+    except ImportError:
+        print("tkinter not available. Falling back to text input.")
+        return None
+    except Exception as e:
+        print(f"Error opening file dialog: {e}. Falling back to text input.")
+        return None
+
+
+def prompt_for_path(default: str = "raw") -> List[str]:
+    """
+    Prompt the user for folder(s) or file path(s) to process.
+    Offers both text input and a GUI file dialog.
 
     Priority order:
     - If a command-line argument is provided, use it (if it exists).
-    - Otherwise, prompt interactively with `input()` and validate.
+    - Otherwise, prompt user to choose between text input or GUI dialog.
 
-    Returns an existing path string.
+    Returns a list of existing path strings.
     """
     # Command-line override (first positional argument)
     if len(sys.argv) > 1:
         candidate = sys.argv[1]
         if os.path.exists(candidate):
-            return candidate
+            return [candidate]
         else:
             print(f"Warning: CLI path provided but does not exist: '{candidate}'")
 
-    # Interactive prompt loop
+    # Offer GUI or text input
+    print("How would you like to select image(s) or folder(s)?")
+    print(" [1] Use file dialog (GUI)")
+    print(" [2] Enter path manually")
+
     while True:
         try:
-            user_input = input(f"Enter folder or file to process [default: {default}]: ").strip()
+            choice = input("Choose [1/2] (default: 1): ").strip()
+        except KeyboardInterrupt:
+            raise
         except EOFError:
-            # Non-interactive environment: fall back to default
+            choice = "1"
+
+        if choice == "" or choice == "1":
+            selected = open_file_dialog()
+            if selected:
+                return selected
+            else:
+                print("No files selected. Please try again or choose option 2 for manual entry.")
+                continue
+
+        elif choice == "2":
+            break
+        else:
+            print("Invalid choice. Enter 1 or 2.")
+
+    # Manual text input loop
+    while True:
+        try:
+            user_input = input(f"Enter folder or file path [default: {default}]: ").strip()
+        except EOFError:
             user_input = ""
+        except KeyboardInterrupt:
+            raise
 
         if user_input == "":
             candidate = default
@@ -131,7 +199,7 @@ def prompt_for_path(default: str = "raw") -> str:
             candidate = user_input
 
         if os.path.exists(candidate):
-            return candidate
+            return [candidate]
         else:
             print(f"Path does not exist: '{candidate}'. Please try again.")
 
@@ -174,27 +242,36 @@ def move_files(file_paths, destination_dir):
 
 if __name__ == '__main__':
 
+    # Freeze Support for multithreading
+    freeze_support()
+
     # Friendly header and usage explanation
     print("\n=== Blur Detector ===")
-    print("This script scans a folder (or a single image) and computes a blur score for each image using the Laplacian variance method.")
-    print("You can provide a path as the first argument (e.g. `python main.py /path/to/images`), or enter one when prompted.")
+    print("This script scans folder(s) or image(s) and computes a blur score for each image using the Laplacian variance method.")
+    print("You can provide a path as the first argument (e.g. `python main.py /path/to/images`), use a file dialog, or enter one when prompted.")
     print("(Press Ctrl+C at any time to abort)\n")
 
     try:
-        foldername = prompt_for_path("raw")
+        selected_paths = prompt_for_path("raw")
     except KeyboardInterrupt:
         print("\nAborted by user.")
         sys.exit(0)
 
-    print(f"\nFinding image files under: '{foldername}'")
-    image_paths_to_process = get_image_paths(foldername)
+    # Collect all image files from all selected paths
+    image_paths_to_process: List[str] = []
+    for path in selected_paths:
+        print(f"\nFinding image files under: '{path}'")
+        image_paths_to_process.extend(get_image_paths(path))
+
+    # Remove duplicates while preserving order
+    image_paths_to_process = list(dict.fromkeys(image_paths_to_process))
 
     total = len(image_paths_to_process)
     if total == 0:
         print("No images found. Exiting.")
         sys.exit(0)
 
-    print(f"Found {total} image(s). Showing up to 5 examples:")
+    print(f"Found {total} image(s) total. Showing up to 5 examples:")
     for p in image_paths_to_process[:5]:
         print(f" - {p}")
 
