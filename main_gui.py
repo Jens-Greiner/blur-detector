@@ -20,51 +20,83 @@ from PyQt6.QtWidgets import (
     QProgressBar, QComboBox, QSpinBox, QFrame, QScrollArea, QListWidget,
     QListWidgetItem, QDialog, QRadioButton, QButtonGroup, QStackedWidget
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QPen, QBrush, QImage
+import styles
 
 
 class HistogramWidget(QWidget):
     """Custom histogram widget for displaying blur score distribution."""
+    bin_clicked = pyqtSignal(list) # Emits list of (path, score) tuples
+
     def __init__(self):
         super().__init__()
         self.scores = []
+        self.results_data = {} # path -> score
+        self.bins_data = [] # List of lists of (path, score)
+        self.rects = [] # List of (rect, bin_index)
         self.setMinimumHeight(200)
-        self.setStyleSheet("background-color: white; border: 1px solid #ddd; border-radius: 5px;")
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # self.setStyleSheet("background-color: white; border: 1px solid #ddd; border-radius: 5px;") # Handled by paintEvent and parent style
     
-    def set_data(self, scores: List[float]):
-        """Update histogram with new scores."""
-        self.scores = scores
+    def set_data(self, results: Dict[str, float]):
+        """Update histogram with new results."""
+        self.results_data = results
+        self.scores = [s for s in results.values() if s is not None]
         self.update()
     
     def paintEvent(self, event):
         """Draw the histogram."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw background/frame
+        painter.fillRect(self.rect(), QColor(styles.Colors.SURFACE))
+        painter.setPen(QPen(QColor(styles.Colors.OUTLINE), 1))
+        painter.drawRoundedRect(self.rect().adjusted(1,1,-1,-1), 4, 4)
 
         if not self.scores:
+            painter.setPen(QColor(styles.Colors.ON_SURFACE_VARIANT))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No data available")
             return
 
-        # Calculate histogram
-        bins = min(20, len(self.scores))
+        # Calculate histogram with fixed bin width of 5
+        import math
         lo = float(min(self.scores))
         hi = float(max(self.scores))
-
-        if lo == hi:
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"All scores equal: {lo:.2f}")
-            return
-
+        
+        # Ensure we have a range
+        if hi == lo:
+            hi += 5.0 # Create a small range if all equal
+            
+        bin_width = 5.0
+        # Align 'lo' to the nearest multiple of 5 below
+        start_val = math.floor(lo / 5.0) * 5.0
+        # Align 'hi' to the nearest multiple of 5 above
+        end_val = math.ceil(hi / 5.0) * 5.0
+        
+        # Calculate number of bins
+        bins = int((end_val - start_val) / bin_width)
+        if bins < 1: bins = 1
+        
+        self.bins_data = [[] for _ in range(bins)]
         counts = [0] * bins
-        for s in self.scores:
-            bin_idx = int((s - lo) / (hi - lo) * (bins - 0.0001))
+        
+        # Populate bins
+        for path, score in self.results_data.items():
+            if score is None: continue
+            if score < start_val: continue
+            bin_idx = int((score - start_val) / bin_width)
+            if bin_idx >= bins: bin_idx = bins - 1
             counts[bin_idx] += 1
+            self.bins_data[bin_idx].append((path, score))
 
         # Draw histogram area
-        left_margin = 60
+        left_margin = 50
         right_margin = 20
         top_margin = 20
-        bottom_margin = 50
+        bottom_margin = 40
 
         width = self.width() - left_margin - right_margin
         height = self.height() - top_margin - bottom_margin
@@ -74,47 +106,60 @@ class HistogramWidget(QWidget):
         max_count = max(counts) if counts else 1
         bar_width = width / bins if bins > 0 else width
 
-        painter.setPen(QPen(Qt.GlobalColor.black, 1))
-        # axes
-        painter.drawLine(x_start, y_start + height, x_start + width, y_start + height)  # x axis
-        painter.drawLine(x_start, y_start, x_start, y_start + height)  # y axis
+        # Grid lines
+        painter.setPen(QPen(QColor(styles.Colors.SURFACE_VARIANT), 1, Qt.PenStyle.DotLine))
+        n_yticks = 5
+        for t in range(n_yticks + 1):
+            y = y_start + height - (t / n_yticks) * height
+            painter.drawLine(x_start, int(y), x_start + width, int(y))
 
-        # bars
+        # Bars
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(styles.Colors.PRIMARY))
+        
+        self.rects = []
         for i, count in enumerate(counts):
             bar_height = (count / max_count) * height if max_count > 0 else 0
             x = x_start + i * bar_width
             y = y_start + height - bar_height
-            painter.fillRect(int(x), int(y), max(1, int(bar_width - 1)), int(bar_height), QBrush(QColor("#1976d2")))
-            painter.drawRect(int(x), int(y), max(1, int(bar_width - 1)), int(bar_height))
+            
+            # Draw rounded top bars
+            rect = QRectF(x, y, max(1, bar_width - 1), bar_height)
+            painter.drawRoundedRect(rect, 2, 2)
+            
+            # Store rect for hit testing (expand width slightly for easier clicking)
+            hit_rect = QRectF(x, y_start, bar_width, height)
+            self.rects.append((hit_rect, i))
 
-        # Draw y-axis ticks and labels (choose ~5 ticks)
-        painter.setPen(QPen(Qt.GlobalColor.black))
+        # Axes and Labels
+        painter.setPen(QPen(QColor(styles.Colors.ON_SURFACE_VARIANT)))
         font = painter.font()
         font.setPointSize(9)
         painter.setFont(font)
 
-        n_yticks = 5
+        # Y-axis labels
         for t in range(n_yticks + 1):
             val = int(round(t * (max_count / n_yticks)))
             y = y_start + height - (t / n_yticks) * height
-            painter.drawLine(x_start - 5, int(y), x_start, int(y))
-            painter.drawText(6, int(y + 4), f"{val}")
+            painter.drawText(0, int(y - 5), x_start - 5, 10, Qt.AlignmentFlag.AlignRight, str(val))
 
-        # Draw x-axis tick labels: use up to 10 labels to avoid overlap
-        max_labels = 10
-        step = max(1, bins // max_labels)
-        for i in range(0, bins, step):
-            bin_lo = lo + i * (hi - lo) / bins
-            bin_hi = lo + (i + 1) * (hi - lo) / bins
-            label_val = (bin_lo + bin_hi) / 2.0
-            x = x_start + i * bar_width + bar_width / 2
-            txt = f"{label_val:.1f}"
-            painter.drawLine(int(x), y_start + height, int(x), y_start + height + 5)
-            painter.drawText(int(x - 15), y_start + height + 20, txt)
+        # X-axis labels (min and max)
+        painter.drawText(x_start, y_start + height + 5, 50, 20, Qt.AlignmentFlag.AlignLeft, f"{start_val:.0f}")
+        painter.drawText(x_start + width - 50, y_start + height + 5, 50, 20, Qt.AlignmentFlag.AlignRight, f"{end_val:.0f}")
 
         # Axis titles
-        painter.drawText(x_start + width // 2 - 40, y_start + height + 40, "Blur Score")
-        painter.drawText(10, y_start + height // 2, "Freq")
+        painter.setPen(QColor(styles.Colors.ON_SURFACE))
+        painter.drawText(x_start, y_start + height + 25, width, 20, Qt.AlignmentFlag.AlignCenter, "Blur Score (Variance)")
+
+    def mousePressEvent(self, event):
+        """Handle mouse clicks to select bins."""
+        pos = event.position()
+        for rect, idx in self.rects:
+            if rect.contains(pos):
+                if idx < len(self.bins_data):
+                    self.bin_clicked.emit(self.bins_data[idx])
+                return
+        super().mousePressEvent(event)
 
 
 def process_image_worker(image_path: str) -> Tuple[str, Optional[float]]:
@@ -221,7 +266,7 @@ class BlurDetectorGUI(QMainWindow):
         
         # Setup UI
         self.setup_ui()
-        self.apply_stylesheet()
+        self.setStyleSheet(styles.get_stylesheet())
         self.show_step(0)
     
     def setup_ui(self):
@@ -229,85 +274,79 @@ class BlurDetectorGUI(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setContentsMargins(24, 24, 24, 24)
+        main_layout.setSpacing(20)
         
-        # Title
+        # Header
+        header_layout = QVBoxLayout()
         title = QLabel("Blur Detector")
-        title_font = QFont()
-        title_font.setPointSize(24)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        title.setProperty("role", "heading")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        main_layout.addWidget(title)
+        header_layout.addWidget(title)
         
         subtitle = QLabel("Advanced blur detection using Laplacian variance analysis")
+        subtitle.setProperty("role", "subheading")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #666; font-size: 11pt;")
-        main_layout.addWidget(subtitle)
+        header_layout.addWidget(subtitle)
         
-        main_layout.addSpacing(10)
+        main_layout.addLayout(header_layout)
+        
+        # Main Card Container
+        card = QFrame()
+        card.setProperty("role", "card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(30, 30, 30, 30)
+        card_layout.setSpacing(20)
+        
+        # Step Indicator (Simple Text for now, could be a progress bar)
+        self.step_label = QLabel("Step 1 of 4")
+        self.step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.step_label.setStyleSheet(f"color: {styles.Colors.PRIMARY}; font-weight: bold; letter-spacing: 1px;")
+        card_layout.addWidget(self.step_label)
+        
+        # Divider
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setStyleSheet(f"color: {styles.Colors.OUTLINE};")
+        card_layout.addWidget(line)
+
+        # Scroll Area for Content
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
         # Stacked widget for steps
         self.stacked_widget = QStackedWidget()
-        
-        # Step 0: Select Images
         self.stacked_widget.addWidget(self.create_step_select_images())
-        
-        # Step 1: Analyze Images
         self.stacked_widget.addWidget(self.create_step_analyze())
-        
-        # Step 2: Filter Results
         self.stacked_widget.addWidget(self.create_step_filter())
-        
-        # Step 3: Results & Actions
         self.stacked_widget.addWidget(self.create_step_results())
         
-        main_layout.addWidget(self.stacked_widget)
+        self.scroll_area.setWidget(self.stacked_widget)
+        card_layout.addWidget(self.scroll_area)
         
         # Navigation buttons
         nav_layout = QHBoxLayout()
         
-        self.prev_btn = QPushButton("← Back")
-        self.prev_btn.setMinimumHeight(40)
-        self.prev_btn.setMinimumWidth(100)
-        self.prev_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #bbb;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #999; }
-        """)
+        self.prev_btn = QPushButton("Back")
+        self.prev_btn.setProperty("role", "secondary")
+        self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.prev_btn.clicked.connect(self.prev_step)
         nav_layout.addWidget(self.prev_btn)
         
         nav_layout.addStretch()
         
-        self.step_label = QLabel("Step 1 of 4")
-        self.step_label.setStyleSheet("font-weight: bold; color: #1976d2;")
-        nav_layout.addWidget(self.step_label)
-        
-        nav_layout.addStretch()
-        
-        self.next_btn = QPushButton("Next →")
-        self.next_btn.setMinimumHeight(40)
-        self.next_btn.setMinimumWidth(100)
-        self.next_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1976d2;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #1565c0; }
-        """)
+        self.next_btn = QPushButton("Next")
+        self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.next_btn.clicked.connect(self.next_step)
         nav_layout.addWidget(self.next_btn)
         
-        main_layout.addLayout(nav_layout)
+        card_layout.addLayout(nav_layout)
+        
+        main_layout.addWidget(card)
     
     def show_step(self, step: int):
         """Show a specific step."""
@@ -354,76 +393,52 @@ class BlurDetectorGUI(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        label = QLabel("Step 1: Select Images or Folders")
-        label_font = QFont()
-        label_font.setPointSize(14)
-        label_font.setBold(True)
-        label.setFont(label_font)
-        label.setStyleSheet("color: #1976d2;")
+        label = QLabel("Select Images or Folders")
+        label.setProperty("role", "heading")
         layout.addWidget(label)
         
         desc = QLabel("Choose image files or folders to analyze:")
-        desc.setStyleSheet("color: #666; margin-bottom: 20px;")
+        desc.setProperty("role", "subheading")
         layout.addWidget(desc)
         
+        layout.addSpacing(20)
+        
         btn_layout = QHBoxLayout()
-        btn_files = QPushButton("🖼️ Add Images")
-        btn_files.setMinimumHeight(40)
-        btn_files.setStyleSheet("""
-            QPushButton {
-                background-color: #0288d1;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #0277bd; }
-        """)
+        btn_files = QPushButton("Add Images")
+        btn_files.setIcon(QIcon.fromTheme("image-x-generic")) # Optional: use system icons if available
+        btn_files.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_files.clicked.connect(self.add_image_files)
         btn_layout.addWidget(btn_files)
         
-        btn_folder = QPushButton("📁 Add Folder")
-        btn_folder.setMinimumHeight(40)
-        btn_folder.setStyleSheet("""
-            QPushButton {
-                background-color: #0288d1;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #0277bd; }
-        """)
+        btn_folder = QPushButton("Add Folder")
+        btn_folder.setIcon(QIcon.fromTheme("folder"))
+        btn_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_folder.clicked.connect(self.add_folder)
         btn_layout.addWidget(btn_folder)
         
         btn_clear = QPushButton("Clear")
-        btn_clear.setMinimumHeight(40)
-        btn_clear.setStyleSheet("""
-            QPushButton { background-color: #eee; border: 1px solid #ddd; border-radius: 5px; color: black; }
-            QPushButton:hover { background-color: #e0e0e0; }
-        """)
+        btn_clear.setProperty("role", "secondary")
+        btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_clear.clicked.connect(self.clear_selection)
         btn_layout.addWidget(btn_clear)
         
         layout.addLayout(btn_layout)
         
         self.path_label = QLabel("No paths selected")
-        self.path_label.setStyleSheet("color: #d32f2f; font-style: italic; margin-top: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 5px;")
+        self.path_label.setStyleSheet(f"color: {styles.Colors.ERROR}; font-style: italic; margin-top: 10px;")
         layout.addWidget(self.path_label)
         
         # Gallery of selected items
         self.gallery_list = QListWidget()
         self.gallery_list.setViewMode(QListWidget.ViewMode.IconMode)
-        self.gallery_list.setIconSize(QPixmap(128,128).size())
+        self.gallery_list.setIconSize(QPixmap(100,100).size())
         self.gallery_list.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.gallery_list.setMovement(QListWidget.Movement.Static)
-        self.gallery_list.setSpacing(10)
+        self.gallery_list.setSpacing(12)
         self.gallery_list.setWrapping(True)
-        self.gallery_list.setMinimumHeight(200)
+        self.gallery_list.setMinimumHeight(250)
         layout.addWidget(self.gallery_list)
         
-        layout.addStretch()
         return widget
     
     def create_step_analyze(self) -> QWidget:
@@ -431,67 +446,52 @@ class BlurDetectorGUI(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        label = QLabel("Step 2: Analyze Images")
-        label_font = QFont()
-        label_font.setPointSize(14)
-        label_font.setBold(True)
-        label.setFont(label_font)
-        label.setStyleSheet("color: #1976d2;")
+        label = QLabel("Analyze Images")
+        label.setProperty("role", "heading")
         layout.addWidget(label)
         
         desc = QLabel("Click 'Start Analysis' to process your images:")
-        desc.setStyleSheet("color: #666; margin-bottom: 20px;")
+        desc.setProperty("role", "subheading")
         layout.addWidget(desc)
         
+        layout.addSpacing(20)
+        
         btn_layout = QHBoxLayout()
-        btn = QPushButton("▶ Start Analysis")
-        btn.setMinimumHeight(40)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #388e3c;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #2e7d32; }
-        """)
+        btn = QPushButton("Start Analysis")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self.start_analysis)
         btn_layout.addWidget(btn)
         
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("color: #388e3c; font-weight: bold; margin-left: 20px;")
+        self.status_label.setStyleSheet(f"color: {styles.Colors.PRIMARY}; font-weight: bold; margin-left: 20px;")
         btn_layout.addWidget(self.status_label)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setMaximum(100)
-        self.progress_bar.setMinimumHeight(30)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                border: 2px solid #ddd;
-                border-radius: 5px;
-                text-align: center;
-            }
-            QProgressBar::chunk {
-                background-color: #1976d2;
-            }
-        """)
         layout.addWidget(self.progress_bar)
+        
+        layout.addSpacing(20)
         
         # Histogram widget
         self.histogram_widget = HistogramWidget()
+        self.histogram_widget.bin_clicked.connect(self.on_bin_clicked)
         layout.addWidget(self.histogram_widget)
         
-        # Sample results label (shows up to 10 evenly spread samples)
-        self.sample_label = QLabel("")
-        self.sample_label.setStyleSheet("font-family: Courier; background-color: #fafafa; border: 1px solid #eee; padding: 8px;")
-        self.sample_label.setMinimumHeight(120)
-        self.sample_label.setWordWrap(True)
-        layout.addWidget(self.sample_label)
+        # Bin details list (replaces sample label)
+        self.bin_info_label = QLabel("Click on a bar in the histogram to view images in that range.")
+        self.bin_info_label.setStyleSheet(f"color: {styles.Colors.ON_SURFACE_VARIANT}; font-style: italic; margin-top: 10px;")
+        layout.addWidget(self.bin_info_label)
+
+        self.bin_details_list = QListWidget()
+        self.bin_details_list.setViewMode(QListWidget.ViewMode.ListMode)
+        self.bin_details_list.setIconSize(QPixmap(64,64).size())
+        self.bin_details_list.setSpacing(5)
+        self.bin_details_list.setMinimumHeight(200)
+        self.bin_details_list.itemDoubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.bin_details_list)
         
-        layout.addStretch()
         return widget
     
     def create_step_filter(self) -> QWidget:
@@ -499,40 +499,26 @@ class BlurDetectorGUI(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        label = QLabel("Step 3: Filter Results")
-        label_font = QFont()
-        label_font.setPointSize(14)
-        label_font.setBold(True)
-        label.setFont(label_font)
-        label.setStyleSheet("color: #1976d2;")
+        label = QLabel("Filter Results")
+        label.setProperty("role", "heading")
         layout.addWidget(label)
         
         desc = QLabel("Set a blur score threshold to identify blurry images:")
-        desc.setStyleSheet("color: #666; margin-bottom: 20px;")
+        desc.setProperty("role", "subheading")
         layout.addWidget(desc)
+        
+        layout.addSpacing(20)
         
         filter_layout = QHBoxLayout()
         threshold_label = QLabel("Threshold:")
-        threshold_label.setStyleSheet("color: black;")
         filter_layout.addWidget(threshold_label)
         
         self.threshold_input = QLineEdit("100.0")
         self.threshold_input.setMaximumWidth(100)
-        self.threshold_input.setStyleSheet("QLineEdit { color: black; }")
         filter_layout.addWidget(self.threshold_input)
         
-        btn = QPushButton("🔍 Filter & Show Results")
-        btn.setMinimumHeight(40)
-        btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f57c00;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #e65100; }
-        """)
+        btn = QPushButton("Filter & Show Results")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.clicked.connect(self.filter_results)
         filter_layout.addWidget(btn)
         filter_layout.addStretch()
@@ -547,17 +533,13 @@ class BlurDetectorGUI(QMainWindow):
         # Open button
         open_layout = QHBoxLayout()
         self.open_btn = QPushButton("Open Selected")
-        self.open_btn.setMinimumHeight(36)
-        self.open_btn.setStyleSheet("""
-            QPushButton { background-color: #1976d2; color: white; border-radius: 5px; }
-            QPushButton:hover { background-color: #1565c0; }
-        """)
+        self.open_btn.setProperty("role", "secondary")
+        self.open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_btn.clicked.connect(self.open_selected_image)
         open_layout.addWidget(self.open_btn)
         open_layout.addStretch()
         layout.addLayout(open_layout)
         
-        layout.addStretch()
         return widget
     
     def create_step_results(self) -> QWidget:
@@ -565,47 +547,26 @@ class BlurDetectorGUI(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        label = QLabel("Step 4: Handle Blurry Images")
-        label_font = QFont()
-        label_font.setPointSize(14)
-        label_font.setBold(True)
-        label.setFont(label_font)
-        label.setStyleSheet("color: #1976d2;")
+        label = QLabel("Handle Blurry Images")
+        label.setProperty("role", "heading")
         layout.addWidget(label)
         
         desc = QLabel("Choose an action for blurry images:")
-        desc.setStyleSheet("color: #666; margin-bottom: 20px;")
+        desc.setProperty("role", "subheading")
         layout.addWidget(desc)
+        
+        layout.addSpacing(20)
         
         action_layout = QHBoxLayout()
         
-        delete_btn = QPushButton("🗑️ Delete Blurry Images")
-        delete_btn.setMinimumHeight(40)
-        delete_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #d32f2f;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #c62828; }
-        """)
+        delete_btn = QPushButton("Delete Blurry Images")
+        delete_btn.setProperty("role", "danger")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         delete_btn.clicked.connect(self.delete_blurry)
         action_layout.addWidget(delete_btn)
         
-        move_btn = QPushButton("📦 Move Blurry Images")
-        move_btn.setMinimumHeight(40)
-        move_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #7b1fa2;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #6a1b9a; }
-        """)
+        move_btn = QPushButton("Move Blurry Images")
+        move_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         move_btn.clicked.connect(self.move_blurry)
         action_layout.addWidget(move_btn)
         
@@ -613,34 +574,12 @@ class BlurDetectorGUI(QMainWindow):
         layout.addLayout(action_layout)
         
         info = QLabel("✓ You can now start over with new images or close the application.")
-        info.setStyleSheet("color: #388e3c; margin-top: 30px; font-weight: bold;")
+        info.setStyleSheet(f"color: {styles.Colors.SUCCESS}; margin-top: 30px; font-weight: bold;")
         layout.addWidget(info)
         
-        layout.addStretch()
         return widget
     
-    def apply_stylesheet(self):
-        """Apply modern stylesheet."""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f8f9fa;
-            }
-            QLabel {
-                color: #333;
-            }
-            QLineEdit {
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                padding: 5px;
-                background-color: white;
-                selection-background-color: #1976d2;
-            }
-            QTextEdit {
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                padding: 5px;
-            }
-        """)
+
 
     def add_image_files(self):
         """Open a multi-file dialog to add image files to selection."""
@@ -880,54 +819,71 @@ class BlurDetectorGUI(QMainWindow):
         """Handle analysis completion."""
         self.results = results
         self.status_label.setText("✓ Analysis complete!")
-        self.status_label.setStyleSheet("color: #388e3c; font-weight: bold;")
-        self.draw_histogram()
-        self.display_results()
+        self.status_label.setStyleSheet(f"color: {styles.Colors.SUCCESS}; font-weight: bold;")
+        self.histogram_widget.set_data(results)
+        # self.display_results() # Removed as per request
     
+    def on_bin_clicked(self, items: List[Tuple[str, float]]):
+        """Handle click on histogram bin."""
+        self.bin_details_list.clear()
+        self.bin_info_label.setText(f"Showing {len(items)} image(s) in selected range:")
+        
+        files_to_thumb = []
+        
+        for path, score in items:
+            item = QListWidgetItem(f"{os.path.basename(path)} (Score: {score:.2f})")
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            
+            # Placeholder icon
+            pm = QPixmap(64, 64)
+            pm.fill(QColor(styles.Colors.SURFACE_VARIANT))
+            item.setIcon(QIcon(pm))
+            
+            self.bin_details_list.addItem(item)
+            files_to_thumb.append(path)
+            
+        # Generate thumbnails for this list
+        if files_to_thumb:
+            worker = ThumbnailWorker(files_to_thumb, size=64)
+            worker.thumbnail_ready.connect(self.on_bin_thumbnail_ready)
+            self._thumb_workers.append(worker)
+            
+            def _on_finished(w=worker):
+                try:
+                    self._thumb_workers.remove(w)
+                except ValueError:
+                    pass
+            
+            worker.finished.connect(_on_finished)
+            worker.start()
+
+    def on_bin_thumbnail_ready(self, path: str, qimage: QImage):
+        """Update thumbnail in bin details list."""
+        for i in range(self.bin_details_list.count()):
+            item = self.bin_details_list.item(i)
+            if item and item.data(Qt.ItemDataRole.UserRole) == path:
+                try:
+                    pix = QPixmap.fromImage(qimage)
+                    item.setIcon(QIcon(pix))
+                except Exception:
+                    pass
+                break
+
     def draw_histogram(self):
         """Draw blur score histogram in the analysis section."""
-        scores = [s for s in self.results.values() if s is not None]
-        self.histogram_widget.set_data(scores)
+        # Handled by set_data now
+        pass
     
     def on_analysis_error(self, error: str):
         """Handle analysis error."""
         self.status_label.setText("✗ Error")
-        self.status_label.setStyleSheet("color: #d32f2f; font-weight: bold;")
+        self.status_label.setStyleSheet(f"color: {styles.Colors.ERROR}; font-weight: bold;")
         QMessageBox.critical(self, "Analysis Error", error)
     
     def display_results(self):
         """Display analysis results."""
-        sorted_results = sorted(
-            [(p, s) for p, s in self.results.items() if s is not None], key=lambda x: x[1]
-        )
-        
-        text = ""
-        
-        if not sorted_results:
-            text = "No valid blur scores found."
-        else:
-            text = f"Found {len(sorted_results)} valid images\n\n"
-            text += "Sample Results (evenly spread):\n\n"
-            
-            L = len(sorted_results)
-            n_show = min(10, L)
-            
-            if n_show == 1:
-                indices = [0]
-            else:
-                indices = [round(i * (L - 1) / (n_show - 1)) for i in range(n_show)]
-            
-            indices = sorted(set(indices))
-            
-            for idx in indices:
-                path, score = sorted_results[idx]
-                text += f"• {os.path.basename(path):40s} | Score: {score:8.2f}\n"
-        
-        # display into sample_label (analysis step) or print to terminal if missing
-        if hasattr(self, 'sample_label') and self.sample_label is not None:
-            self.sample_label.setText(text)
-        else:
-            print(text)
+        # Deprecated/Removed
+        pass
     
     def filter_results(self):
         """Filter results by threshold."""
