@@ -165,22 +165,48 @@ def get_stylesheet() -> str:
         border-radius: 4px;
     }}
     
-    /* ScrollBar */
+    /* ScrollBar - Invisible/Minimal */
+    /* ScrollBar - Invisible/Minimal */
     QScrollBar:vertical {{
         border: none;
-        background: {Colors.SURFACE_VARIANT};
-        width: 10px;
-        border-radius: 5px;
+        background: transparent;
+        width: 6px;
+        margin: 0px;
     }}
     
     QScrollBar::handle:vertical {{
-        background: {Colors.OUTLINE};
+        background: rgba(0, 0, 0, 0.2);
         min-height: 20px;
-        border-radius: 5px;
+        border-radius: 3px;
+    }}
+    
+    QScrollBar::handle:vertical:hover {{
+        background: rgba(0, 0, 0, 0.4);
     }}
     
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0px;
+    }}
+    
+    QScrollBar:horizontal {{
+        border: none;
+        background: transparent;
+        height: 6px;
+        margin: 0px;
+    }}
+    
+    QScrollBar::handle:horizontal {{
+        background: rgba(0, 0, 0, 0.2);
+        min-width: 20px;
+        border-radius: 3px;
+    }}
+    
+    QScrollBar::handle:horizontal:hover {{
+        background: rgba(0, 0, 0, 0.4);
+    }}
+    
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        width: 0px;
     }}
 
     /* ScrollArea and StackedWidget Backgrounds */

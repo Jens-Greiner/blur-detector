@@ -27,14 +27,16 @@ import styles
 
 class HistogramWidget(QWidget):
     """Custom histogram widget for displaying blur score distribution."""
-    bin_clicked = pyqtSignal(list) # Emits list of (path, score) tuples
+    bin_clicked = pyqtSignal(list, int) # Emits (list of items, bin_index)
 
     def __init__(self):
         super().__init__()
         self.scores = []
         self.results_data = {} # path -> score
         self.bins_data = [] # List of lists of (path, score)
+        self.bins_data = [] # List of lists of (path, score)
         self.rects = [] # List of (rect, bin_index)
+        self.selected_bin_index = -1
         self.setMinimumHeight(200)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -115,13 +117,18 @@ class HistogramWidget(QWidget):
 
         # Bars
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(styles.Colors.PRIMARY))
         
         self.rects = []
         for i, count in enumerate(counts):
             bar_height = (count / max_count) * height if max_count > 0 else 0
             x = x_start + i * bar_width
             y = y_start + height - bar_height
+            
+            # Set brush color (highlight selected)
+            if i == self.selected_bin_index:
+                painter.setBrush(QColor(styles.Colors.TERTIARY)) # Highlight color
+            else:
+                painter.setBrush(QColor(styles.Colors.PRIMARY))
             
             # Draw rounded top bars
             rect = QRectF(x, y, max(1, bar_width - 1), bar_height)
@@ -154,11 +161,18 @@ class HistogramWidget(QWidget):
     def mousePressEvent(self, event):
         """Handle mouse clicks to select bins."""
         pos = event.position()
+        clicked_index = -1
         for rect, idx in self.rects:
             if rect.contains(pos):
-                if idx < len(self.bins_data):
-                    self.bin_clicked.emit(self.bins_data[idx])
-                return
+                clicked_index = idx
+                break
+        
+        if clicked_index != -1:
+            self.selected_bin_index = clicked_index
+            self.update() # Redraw to show highlight
+            if clicked_index < len(self.bins_data):
+                self.bin_clicked.emit(self.bins_data[clicked_index], clicked_index)
+        
         super().mousePressEvent(event)
 
 
@@ -289,6 +303,12 @@ class BlurDetectorGUI(QMainWindow):
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header_layout.addWidget(subtitle)
         
+        # Step Indicator (Moved to header)
+        self.step_label = QLabel("Step 1 of 3")
+        self.step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.step_label.setStyleSheet(f"color: {styles.Colors.PRIMARY}; font-weight: bold; letter-spacing: 1px; margin-top: 10px;")
+        header_layout.addWidget(self.step_label)
+        
         main_layout.addLayout(header_layout)
         
         # Main Card Container
@@ -298,18 +318,12 @@ class BlurDetectorGUI(QMainWindow):
         card_layout.setContentsMargins(30, 30, 30, 30)
         card_layout.setSpacing(20)
         
-        # Step Indicator (Simple Text for now, could be a progress bar)
-        self.step_label = QLabel("Step 1 of 4")
-        self.step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.step_label.setStyleSheet(f"color: {styles.Colors.PRIMARY}; font-weight: bold; letter-spacing: 1px;")
-        card_layout.addWidget(self.step_label)
-        
-        # Divider
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        line.setStyleSheet(f"color: {styles.Colors.OUTLINE};")
-        card_layout.addWidget(line)
+        # Divider (Removed)
+        # line = QFrame()
+        # line.setFrameShape(QFrame.Shape.HLine)
+        # line.setFrameShadow(QFrame.Shadow.Sunken)
+        # line.setStyleSheet(f"color: {styles.Colors.OUTLINE};")
+        # card_layout.addWidget(line)
 
         # Scroll Area for Content
         self.scroll_area = QScrollArea()
@@ -323,12 +337,12 @@ class BlurDetectorGUI(QMainWindow):
         self.stacked_widget.addWidget(self.create_step_select_images())
         self.stacked_widget.addWidget(self.create_step_analyze())
         self.stacked_widget.addWidget(self.create_step_filter())
-        self.stacked_widget.addWidget(self.create_step_results())
+        # self.stacked_widget.addWidget(self.create_step_results()) # Removed Step 4
         
         self.scroll_area.setWidget(self.stacked_widget)
         card_layout.addWidget(self.scroll_area)
         
-        # Navigation buttons
+        # Navigation Buttons
         nav_layout = QHBoxLayout()
         
         self.prev_btn = QPushButton("Back")
@@ -338,6 +352,20 @@ class BlurDetectorGUI(QMainWindow):
         nav_layout.addWidget(self.prev_btn)
         
         nav_layout.addStretch()
+        
+        # Action Buttons (Hidden by default, shown in Step 3)
+        self.delete_btn = QPushButton("Delete Blurry")
+        self.delete_btn.setProperty("role", "danger")
+        self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_btn.clicked.connect(self.delete_blurry)
+        self.delete_btn.hide()
+        nav_layout.addWidget(self.delete_btn)
+        
+        self.move_btn = QPushButton("Move Blurry")
+        self.move_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.move_btn.clicked.connect(self.move_blurry)
+        self.move_btn.hide()
+        nav_layout.addWidget(self.move_btn)
         
         self.next_btn = QPushButton("Next")
         self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -352,17 +380,25 @@ class BlurDetectorGUI(QMainWindow):
         """Show a specific step."""
         self.current_step = step
         self.stacked_widget.setCurrentIndex(step)
-        self.step_label.setText(f"Step {step + 1} of 4")
+        self.step_label.setText(f"Step {step + 1} of 3")
         
         # Update button visibility
         self.prev_btn.setEnabled(step > 0)
         
+        # Reset button visibility
+        self.next_btn.hide()
+        self.delete_btn.hide()
+        self.move_btn.hide()
+        
         if step == 0:
-            self.next_btn.setText("Next →")
-        elif step == 3:
-            self.next_btn.setText("Finish")
+            self.next_btn.setText("Next")
+            self.next_btn.show()
+        elif step == 2: # Filter step
+            self.delete_btn.show()
+            self.move_btn.show()
         else:
-            self.next_btn.setText("Next →")
+            self.next_btn.setText("Next")
+            self.next_btn.show()
     
     def prev_step(self):
         """Go to previous step."""
@@ -381,11 +417,8 @@ class BlurDetectorGUI(QMainWindow):
                 return
         elif self.current_step == 2:  # Filter
             pass
-        elif self.current_step == 3:  # Results
-            QMessageBox.information(self, "Complete", "Blur detection workflow complete!")
-            return
         
-        if self.current_step < 3:
+        if self.current_step < 2:
             self.show_step(self.current_step + 1)
     
     def create_step_select_images(self) -> QWidget:
@@ -539,6 +572,29 @@ class BlurDetectorGUI(QMainWindow):
         open_layout.addWidget(self.open_btn)
         open_layout.addStretch()
         layout.addLayout(open_layout)
+        
+        layout.addSpacing(20)
+        
+        # Actions (Moved to footer)
+        # action_label = QLabel("Actions:")
+        # action_label.setProperty("role", "subheading")
+        # layout.addWidget(action_label)
+        
+        # action_layout = QHBoxLayout()
+        
+        # delete_btn = QPushButton("Delete Blurry Images")
+        # delete_btn.setProperty("role", "danger")
+        # delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # delete_btn.clicked.connect(self.delete_blurry)
+        # action_layout.addWidget(delete_btn)
+        
+        # move_btn = QPushButton("Move Blurry Images")
+        # move_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # move_btn.clicked.connect(self.move_blurry)
+        # action_layout.addWidget(move_btn)
+        
+        # action_layout.addStretch()
+        # layout.addLayout(action_layout)
         
         return widget
     
@@ -823,10 +879,29 @@ class BlurDetectorGUI(QMainWindow):
         self.histogram_widget.set_data(results)
         # self.display_results() # Removed as per request
     
-    def on_bin_clicked(self, items: List[Tuple[str, float]]):
+    def on_bin_clicked(self, items: List[Tuple[str, float]], bin_index: int):
         """Handle click on histogram bin."""
         self.bin_details_list.clear()
-        self.bin_info_label.setText(f"Showing {len(items)} image(s) in selected range:")
+        
+        # Calculate range
+        # Assuming fixed bin width of 5.0 and start_val is aligned to 5.0
+        # We need to know the start_val used in HistogramWidget. 
+        # Ideally HistogramWidget should pass the range, but we can infer or just ask it.
+        # For now, let's recalculate or approximate based on index if we knew the min.
+        # Better: HistogramWidget logic uses start_val = math.floor(lo / 5.0) * 5.0
+        # We can access self.histogram_widget.scores to re-derive start_val or just pass it.
+        
+        # Let's just calculate it here quickly using the same logic
+        scores = [s for s in self.results.values() if s is not None]
+        if not scores: return
+        
+        import math
+        lo = float(min(scores))
+        start_val = math.floor(lo / 5.0) * 5.0
+        bin_start = start_val + (bin_index * 5.0)
+        bin_end = bin_start + 5.0
+        
+        self.bin_info_label.setText(f"Range: {bin_start:.0f} - {bin_end:.0f} | Showing {len(items)} image(s):")
         
         files_to_thumb = []
         
