@@ -6,8 +6,8 @@ dist/
 wheels/
 *.egg-info
 
-uv.lock
 temp.dat
+
 .python-version
 
 
