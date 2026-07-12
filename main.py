@@ -1,102 +1,21 @@
-import rawpy
-import numpy as np
-import cv2
 import os
 import sys
 import shutil
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from multiprocessing import Pool, cpu_count, freeze_support
 
-def _process_image_and_calculate_blurriness(image_path: str) -> Tuple[str, Optional[float]]:
-    """
-    Worker function to process a single image and calculate its blurriness.
-    Returns a tuple (image_path, variance) where variance may be None on error.
-    This function is designed to be run in a separate process.
-    """
-    try:
-        if not os.path.exists(image_path):
-            # Return the path with None to indicate failure
-            return (image_path, None)
+from blur_core import (
+    calculate_blurriness,
+    get_image_paths,
+    unique_destination,
+    cache_path_for,
+    load_cache,
+    save_cache,
+    cached_score,
+    has_valid_cache_entry,
+    make_cache_entry,
+)
 
-        file_extension = os.path.splitext(image_path)[1].lower()
-        rgb_image = None
-        
-        if file_extension in ['.cr3', '.dng', '.nef', '.arw']:
-            with rawpy.imread(image_path) as raw:
-                # Use a fast demosaicing algorithm for better performance
-                rgb_image = raw.postprocess(rawpy.Params(
-                    demosaic_algorithm=rawpy.DemosaicAlgorithm.LINEAR, 
-                    use_camera_wb=True, 
-                    no_auto_bright=True,
-                    half_size=True
-                ))
-        else:
-            rgb_image = cv2.imread(image_path)
-            if rgb_image is None:
-                return (image_path, None)
-
-        # Convert the RGB image to grayscale
-        gray_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
-
-        # Apply the Laplacian filter
-        laplacian = cv2.Laplacian(gray_image, cv2.CV_64F)
-
-        # Calculate the variance of the Laplacian
-        variance = laplacian.var()
-
-        return (image_path, float(variance))
-
-    except rawpy.FileOpenError:
-        return (image_path, None)
-    except Exception:
-        return (image_path, None)
-
-
-def get_image_paths(path: str) -> List[str]:
-    """
-    Finds all image files within a given path (either a single file or a directory)
-    and returns a dictionary of their paths and corresponding file types.
-
-    Args:
-        path: The full path to a file or a directory to search.
-
-    Returns:
-        A dictionary where keys are the absolute paths to image files and
-        values are their file extensions (e.g., '.jpg', '.png').
-    """
-    image_files: List[str] = []
-    
-    # A set of common image file extensions
-    IMAGE_EXTENSIONS: List[str] = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp', '.svg', '.cr3', '.dng', '.nef', '.arw']
-
-    # Normalize the path to handle different OS conventions
-    normalized_path: str = os.path.abspath(path)
-
-    # Check if the path exists
-    if not os.path.exists(normalized_path):
-        print(f"Error: Path does not exist - '{normalized_path}'")
-        return image_files
-
-    # Case 1: The path is a single file
-    if os.path.isfile(normalized_path):
-        filename, file_extension = os.path.splitext(normalized_path)
-        if file_extension.lower() in IMAGE_EXTENSIONS:
-            image_files.append(normalized_path)
-        else:
-            print(f"The provided file is not a supported image type: '{normalized_path}'")
-        return image_files
-
-    # Case 2: The path is a directory
-    if os.path.isdir(normalized_path):
-        print(f"Searching for images in directory: '{normalized_path}'")
-        for dirpath, _, filenames in os.walk(normalized_path):
-            for filename in filenames:
-                _, file_extension = os.path.splitext(filename)
-                if file_extension.lower() in IMAGE_EXTENSIONS:
-                    full_path: str = os.path.join(dirpath, filename)
-                    image_files.append(full_path)
-    
-    return image_files
 
 def open_file_dialog() -> Optional[List[str]]:
     """
@@ -223,9 +142,9 @@ def move_files(file_paths, destination_dir):
         try:
             # Check if the file exists before attempting to move it
             if os.path.exists(file_path):
-                # Construct the new path for the file in the destination directory
+                # Construct a collision-safe path in the destination directory
                 file_name = os.path.basename(file_path)
-                destination_path = os.path.join(destination_dir, file_name)
+                destination_path = unique_destination(destination_dir, file_name)
 
                 # Move the file
                 shutil.move(file_path, destination_path)
@@ -286,29 +205,59 @@ if __name__ == '__main__':
 
     # Use multiprocessing to process the images
     num_processes = cpu_count()
-    print(f"\nUsing {num_processes} process(es) to analyze {total} image(s). This may take a while...")
+
+    # Load any cached scores for this selection and split the work: unchanged
+    # files come straight from the cache, only the rest go through the pool.
+    cache_file = cache_path_for(selected_paths)
+    cache_entries = load_cache(cache_file)
 
     results: Dict[str, Optional[float]] = {}
+    to_compute: List[str] = []
+    for path in image_paths_to_process:
+        if has_valid_cache_entry(cache_entries, path):
+            results[path] = cached_score(cache_entries, path)
+        else:
+            to_compute.append(path)
+
+    cached_count = len(results)
+    if cached_count:
+        print(f"\nReusing {cached_count} cached score(s); {len(to_compute)} to (re)analyze.")
+
+    print(f"Using {num_processes} process(es) to analyze {len(to_compute)} image(s). This may take a while...")
+
     # Use imap_unordered so we can show progress as results arrive
     try:
-        with Pool(processes=num_processes) as pool:
-            it = pool.imap_unordered(_process_image_and_calculate_blurriness, image_paths_to_process)
-            seen = 0
-            bar_len = 40
-            for res in it:
-                seen += 1
-                if isinstance(res, tuple) and len(res) >= 2:
-                    path, score = res
-                    results[path] = score
-                # progress bar
-                pct = seen / total
-                filled = int(pct * bar_len)
-                bar = "#" * filled + "-" * (bar_len - filled)
-                print(f"\rAnalyzing images [{bar}] {seen}/{total}", end="", flush=True)
-            print()
+        if to_compute:
+            with Pool(processes=num_processes) as pool:
+                it = pool.imap_unordered(calculate_blurriness, to_compute)
+                seen = 0
+                bar_len = 40
+                n = len(to_compute)
+                for res in it:
+                    seen += 1
+                    if isinstance(res, tuple) and len(res) >= 2:
+                        path, score = res
+                        results[path] = score
+                        entry = make_cache_entry(path, score)
+                        if entry is not None:
+                            cache_entries[path] = entry
+                    # progress bar
+                    pct = seen / n
+                    filled = int(pct * bar_len)
+                    bar = "#" * filled + "-" * (bar_len - filled)
+                    print(f"\rAnalyzing images [{bar}] {seen}/{n}", end="", flush=True)
+                print()
     except KeyboardInterrupt:
         print("\nAnalysis aborted by user. Terminating...")
+        save_cache(cache_file, cache_entries)
         sys.exit(0)
+
+    # Persist the cache for next time.
+    save_cache(cache_file, cache_entries)
+
+    n_failed = sum(1 for s in results.values() if s is None)
+    if n_failed:
+        print(f"\nNote: {n_failed} file(s) could not be read and were skipped.")
 
     print("\nAnalysis complete. Sample results (up to 10), evenly spread across scores:")
 

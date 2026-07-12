@@ -1,0 +1,63 @@
+name: Build Windows EXE
+
+# Build a single-file, windowed Windows executable of the Blur Detector GUI.
+# PyInstaller cannot cross-compile, so this must run on a Windows runner.
+#
+# - Push a tag like `v0.1.0`  -> builds the exe AND publishes a GitHub Release
+#   with BlurDetector.exe attached.
+# - Run manually (workflow_dispatch) -> builds the exe and uploads it as a
+#   downloadable Actions artifact, without creating a release. Use this to test
+#   the build before cutting a tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed for softprops/action-gh-release to create the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv (pinned Python 3.13)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Add PyInstaller (build-only tool)
+        run: uv pip install pyinstaller
+
+      - name: Build BlurDetector.exe
+        # --windowed: no console window for the GUI.
+        # --collect-all rawpy: rawpy bundles compiled libraw binaries that
+        #   PyInstaller's static analysis misses.
+        # --collect-submodules cv2: guards against OpenCV lazy-import misses.
+        run: >
+          uv run pyinstaller --onefile --windowed --name BlurDetector
+          --collect-all rawpy
+          --collect-submodules cv2
+          main_gui.py
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlurDetector-windows
+          path: dist/BlurDetector.exe
+          if-no-files-found: error
+
+      - name: Publish release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/BlurDetector.exe
+          generate_release_notes: true
