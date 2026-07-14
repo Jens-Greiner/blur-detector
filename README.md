@@ -10,7 +10,7 @@ app (`main_gui.py`) and an interactive terminal app (`main.py`).
 ## Download (Windows)
 
 Grab the latest **`BlurDetector.exe`** from the
-[Releases page](../../releases/latest). No Python install required — download,
+[Releases page](https://github.com/kadnermarwin/blur-detector/releases/latest). No Python install required — download,
 double-click, and go.
 
 > **Note:** the executable is unsigned, so Windows SmartScreen or your antivirus
@@ -26,7 +26,6 @@ Uses [uv](https://docs.astral.sh/uv/) and requires Python 3.13.
 uv run main_gui.py             # PyQt6 GUI
 uv run main.py                 # CLI, prompts for input
 uv run main.py /path/to/images # CLI with a path argument
-```
 
 ## Supported formats
 
